@@ -56,7 +56,7 @@ app.post('/participants', async (req, res) => {
     res.status(201).send('Receita criada com sucesso!');
     const moment = dayjs().format('HH:MM:SS');
     const joinMessage = {
-      form: req.body.name,
+      from: req.body.name,
       to: 'Todos',
       text: 'entra na sala...',
       type: 'status',
@@ -184,76 +184,114 @@ app.post('/status', async (req, res) => {
 setInterval(async () => await checkInactivity(), 15000);
 
 async function checkInactivity() {
-  const participants = await db.collection('participants').find().toArray();
-  const moment = Date.now();
-  const inactiveParticipants = participants.filter(
-    (participant) => moment - participant.lastStatus >= 10000
-  );
-  for (const participant of inactiveParticipants) {
-    await db.collection('participants').deleteOne({ name: participant.name });
-    const moment = dayjs().format('HH:MM:SS');
-    const leaveMessage = {
-      from: participant.name,
-      to: 'Todos',
-      text: 'sai na sala...',
-      type: 'status',
-      time: moment,
-    };
-    await db.collection('messages').insertOne(leaveMessage);
+  try {
+    const participants = await db.collection('participants').find().toArray();
+    const moment = Date.now();
+    const inactiveParticipants = participants.filter(
+      (participant) => moment - participant.lastStatus >= 10000
+    );
+    for (const participant of inactiveParticipants) {
+      await db.collection('participants').deleteOne({ name: participant.name });
+      const moment = dayjs().format('HH:MM:SS');
+      const leaveMessage = {
+        from: participant.name,
+        to: 'Todos',
+        text: 'sai na sala...',
+        type: 'status',
+        time: moment,
+      };
+      await db.collection('messages').insertOne(leaveMessage);
+    }
+  } catch (err) {
+    res.status(500).send(err);
   }
 }
 
 app.delete('/messages/:message_id', async (req, res) => {
-  const { ingredientes } = req.params;
+  const { message_id } = req.query;
 
-  try {
-    const { deletedCount } = await db
-      .collection('receitas')
-      .deleteMany({ ingredientes: ingredientes });
+  const username = req.headers.user;
 
-    if (!deletedCount) {
-      return res.status(400).send('Nenhuma receita foi deletada');
-    }
-
-    res.send('Receitas deletadas com sucesso!');
-  } catch (err) {
-    console.log(err);
-    res.sendStatus(500);
-  }
-});
-
-app.put('/messages/:message_id', async (req, res) => {
-  const { id } = req.params;
-  const receita = req.body;
-
-  const validation = receitaSchema.validate(receita, { abortEarly: false });
-
-  if (validation.error) {
-    const errors = validation.error.details.map((detail) => detail.message);
-    res.send(errors);
+  if (!username || !message_id) {
+    res.send(422);
     return;
   }
 
   try {
-    const receitaEncontrada = await db
-      .collection('receitas')
-      .findOne({ _id: new ObjectId(id) });
+    const messageFound = db
+      .collection('messages')
+      .findOne({ _id: new ObjectId(message_id) });
 
-    console.log(receitaEncontrada);
-
-    if (!receitaEncontrada) {
-      res.status(400).send('Receita não encontrada');
+    if (!messageFound) {
+      res.sendStatus(404);
       return;
     }
 
-    await db
-      .collection('receitas')
-      .updateOne({ _id: receitaEncontrada._id }, { $set: receita });
+    if (messageFound.from !== username) {
+      res.sendStatus(401);
+      return;
+    }
 
-    res.send('Receita atualizada com sucesso!');
+    const { deletedCount } = db
+      .collection('messages')
+      .deleteOne({ _id: new ObjectId(message_id) });
+
+    res.send('Mensagem deletada com sucesso!');
   } catch (err) {
-    console.log(err);
-    res.sendStatus(500);
+    res.status(500).send(err);
+  }
+});
+
+app.put('/messages/:message_id', async (req, res) => {
+  const validation = messageSchema.validate(req.body);
+
+  if (validation.error) {
+    res.status(422).send(validation.error.details);
+    return;
+  }
+
+  const username = req.headers.user;
+
+  if (!username) {
+    res.send(422);
+    return;
+  }
+
+  try {
+    const nameFound = await db
+      .collection('participants')
+      .findOne({ name: username });
+    if (!nameFound) {
+      res.sendStatus(422);
+      return;
+    }
+    const { message_id } = req.query;
+    if (!message_id) {
+      res.send(404);
+      return;
+    }
+    const messageFound = await db
+      .collection('messages')
+      .findOne({ _id: new ObjectId(message_id) });
+    if (!messageFound) {
+      res.sendStatus(404);
+      return;
+    }
+    if (messageFound.from !== username) {
+      res.sendStatus(401);
+      return;
+    }
+    const messageObject = {
+      to: req.body.to,
+      text: req.body.text,
+      type: req.body.type,
+    };
+    await db
+      .collection('messages')
+      .updateOne({ _id: new ObjectId(message_id) }, { $set: messageObject });
+    res.send(200);
+  } catch (err) {
+    res.status(500).send(err);
   }
 });
 
