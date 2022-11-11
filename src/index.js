@@ -3,11 +3,16 @@ import cors from 'cors';
 import { MongoClient, ObjectId } from 'mongodb';
 import dotenv from 'dotenv';
 import joi from 'joi';
+import dayjs from 'dayjs';
 
-const receitaSchema = joi.object({
-  titulo: joi.string().required().min(3).max(100),
-  ingredientes: joi.string().required(),
-  preparo: joi.string().required(),
+const participantSchema = joi.object({
+  name: joi.string().required(),
+});
+
+const messageSchema = joi.object({
+  to: joi.string().required(),
+  text: joi.string().required(),
+  type: joi.string().required(),
 });
 
 const app = express();
@@ -27,84 +32,178 @@ try {
   console.log(err);
 }
 
-app.get('/receitas', async (req, res) => {
-  try {
-    const receitas = await db
-      .collection('receitas')
-      .find({}, { _id: 0 })
-      .toArray();
-    /* const receitasSemId = receitas.map((receita) => {
-      return {
-        titulo: receita.titulo,
-        ingredientes: receita.ingredientes,
-        preparo: receita.preparo,
-      };
-    }); */
-    res.send(receitas);
-  } catch (err) {
-    console.log(err);
-    res.sendStatus(500);
-  }
-});
-
-app.get('/receitas/:id', async (req, res) => {
-  const { id } = req.params;
-
-  try {
-    const receitaEncontrada = await db
-      .collection('receitas')
-      .findOne({ _id: new ObjectId(id) });
-
-    console.log(receitaEncontrada);
-
-    if (!receitaEncontrada) {
-      res.status(400).send('Receita não encontrada');
-      return;
-    }
-
-    res.send(receitaEncontrada);
-  } catch (err) {
-    console.log(err);
-    res.sendStatus(500);
-  }
-});
-
-app.post('/receitas', async (req, res) => {
-  const body = req.body;
-
-  const validation = receitaSchema.validate(body, { abortEarly: false });
+app.post('/participants', async (req, res) => {
+  const validation = participantSchema.validate(req.body);
 
   if (validation.error) {
-    const errors = validation.error.details.map((detail) => detail.message);
-    res.send(errors);
+    res.status(422).send(validation.error.details);
     return;
   }
 
   try {
-    await db.collection('receitas').insert(body);
+    const nameFound = await db
+      .collection('participants')
+      .findOne({ name: req.body.name });
+    if (nameFound) {
+      res.sendStatus(409);
+      return;
+    }
+    const participantObject = {
+      name: req.body.name,
+      lastStatus: Date.now(),
+    };
+    await db.collection('particpants').insertOne(participantObject);
     res.status(201).send('Receita criada com sucesso!');
+    const moment = dayjs().format('HH:MM:SS');
+    const joinMessage = {
+      form: req.body.name,
+      to: 'Todos',
+      text: 'entra na sala...',
+      type: 'status',
+      time: moment,
+    };
+    db.collection('messages').insertOne(joinMessage);
   } catch (err) {
     res.status(500).send(err);
   }
 });
 
-app.delete('/receitas/:id', async (req, res) => {
-  const { id } = req.params;
-
+app.get('/participants', async (req, res) => {
   try {
-    const resp = await db
-      .collection('receitas')
-      .deleteOne({ _id: ObjectId(id) });
-
-    console.log(resp);
-    res.send('Receita apagada com sucesso!');
+    const participants = await db.collection('participants').find().toArray();
+    res.status(200).send(participants);
   } catch (err) {
-    console.log(err);
-    res.sendStatus(500);
+    res.status(500).send(err);
   }
 });
 
-app.delete('/receitas/many/:ingredientes', async (req, res) => {
+app.post('/messages', async (req, res) => {
+  const validation = messageSchema.validate(req.body);
+
+  if (validation.error) {
+    res.status(422).send(validation.error.details);
+    return;
+  }
+
+  if (req.body.type !== 'message' && req.body.type !== 'private_message') {
+    res.sendStatus(422);
+    return;
+  }
+
+  const username = req.headers.user;
+
+  if (!username) {
+    res.sendStatus(422);
+    return;
+  }
+
+  try {
+    const nameFound = await db
+      .collection('participants')
+      .findOne({ name: username });
+    if (!nameFound) {
+      res.sendStatus(422);
+      return;
+    }
+    const moment = dayjs().format('HH:MM:SS');
+    const messageObject = {
+      from: username,
+      to: req.body.to,
+      text: req.body.text,
+      type: req.body.type,
+      time: moment,
+    };
+    await db.collection('messages').insertOne(messageObject);
+    res.sendStatus(201);
+  } catch (err) {
+    res.status(500).send(err);
+  }
+});
+
+app.get('/messages', async (req, res) => {
+  const { limit } = req.query;
+
+  const username = req.headers.user;
+
+  if (!username) {
+    res.send(422);
+    return;
+  }
+
+  try {
+    const messages = await db.collection('messages').find().toArray();
+    messages.reverse();
+    const filteredMessages = messages.filter((message) => {
+      if (
+        message.to === 'Todos' ||
+        message.to === username ||
+        message.from === username
+      ) {
+        return true;
+      } else return false;
+    });
+    if (!limit) {
+      res.send(filteredMessages);
+      return;
+    } else {
+      res.send(filteredMessages.slice(0, limit));
+      return;
+    }
+  } catch (err) {
+    res.status(500).send(err);
+  }
+});
+
+app.post('/status', async (req, res) => {
+  const username = req.headers.user;
+
+  if (!username) {
+    res.send(422);
+    return;
+  }
+
+  try {
+    const participant = await db
+      .collection('participants')
+      .findOne({ name: username });
+    if (!participant) {
+      res.sendStatus(404);
+      return;
+    }
+    const moment = Date.now();
+    participant.lastStatus = moment;
+    await db
+      .collection('participants')
+      .updateOne({ name: username }, { $set: participant });
+    res.send(200);
+  } catch (err) {
+    res.status(500).send(err);
+  }
+});
+
+setInterval(async () => await checkInactivity(), 15000);
+
+async function checkInactivity() {
+  const participants = await db.collection('participants').find().toArray();
+  const moment = Date.now();
+  const inactiveParticipants = participants.filter(
+    (participant) => moment - participant.lastStatus >= 10000
+  );
+  for (const participant of inactiveParticipants) {
+    await db.collection('participants').deleteOne({ name: participant.name });
+    const moment = dayjs().format('HH:MM:SS');
+    const leaveMessage = {
+      from: participant.name,
+      to: 'Todos',
+      text: 'sai na sala...',
+      type: 'status',
+      time: moment,
+    };
+    await db.collection('messages').insertOne(leaveMessage);
+  }
+}
+
+app.delete('/messages/:message_id', async (req, res) => {
   const { ingredientes } = req.params;
 
   try {
@@ -123,7 +222,7 @@ app.delete('/receitas/many/:ingredientes', async (req, res) => {
   }
 });
 
-app.put('/receitas/:id', async (req, res) => {
+app.put('/messages/:message_id', async (req, res) => {
   const { id } = req.params;
   const receita = req.body;
 
@@ -158,67 +257,6 @@ app.put('/receitas/:id', async (req, res) => {
   }
 });
 
-app.put('/receitas/many/:ingredientes', async (req, res) => {
-  const { ingredientes } = req.params;
-  const receita = req.body;
-
-  try {
-    const receitasEncontradas = await db
-      .collection('receitas')
-      .find({ ingredientes: ingredientes });
-
-    if (receitasEncontradas.length === 0) {
-      res.status(400).send('Receitas não encontradas');
-      return;
-    }
-
-    await db
-      .collection('receitas')
-      .updateMany({ ingredientes: ingredientes }, { $set: receita });
-
-    res.send('Receitas atualizadas com sucesso!');
-  } catch (err) {
-    console.log(err);
-    res.sendStatus(500);
-  }
-});
-
-app.get('/receitas/pesquisa-titulo/:titulo', async (req, res) => {
-  const { titulo } = req.params;
-
-  try {
-    const receitas = await db
-      .collection('receitas')
-      .find({ titulo: { $regex: titulo, $options: 'i' } })
-      .toArray();
-
-    res.send(receitas);
-  } catch (err) {
-    console.log(err);
-    res.sendStatus(500);
-  }
-});
-
-app.get('/receitas/pesquisa/:valor', async (req, res) => {
-  const { valor } = req.params;
-
-  try {
-    const regex = { $regex: valor, $options: 'i' };
-
-    const receitas = await db
-      .collection('receitas')
-      .find({
-        $or: [{ titulo: regex }, { ingredientes: regex }, { preparo: regex }],
-      })
-      .toArray();
-
-    res.send(receitas);
-  } catch (err) {
-    console.log(err);
-    res.sendStatus(500);
-  }
-});
-
-app.listen(4000, () => {
-  console.log(`Server running in port: ${4000}`);
+app.listen(5000, () => {
+  console.log(`Server running in port: ${5000}`);
 });
